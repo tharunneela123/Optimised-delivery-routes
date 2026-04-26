@@ -21,7 +21,6 @@ The system helps users find the most efficient delivery route by organizing mult
 - Vite
 - TypeScript
 - Tailwind CSS
-- Lovable AI generated UI
 
 ### Backend
 - Node.js
