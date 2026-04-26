@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
+import { RouteMap } from "@/components/RouteMap";
 import {
   Activity,
   BarChart3,
@@ -11,6 +12,7 @@ import {
   Plus,
   Route,
   Sparkles,
+  Star,
   TimerReset,
   Truck,
   Zap,
@@ -22,7 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-const baseStops = ["88 Harbor Way, Brooklyn", "12 Market Street, Queens", "440 Hudson Ave, Manhattan"];
+const baseStops = ["Times Square, New York", "Empire State Building, New York", "Central Park, New York"];
 
 const deliveryData = [
   { day: "Mon", deliveries: 42, saved: 7 },
@@ -41,32 +43,119 @@ const navItems = [
 ];
 
 const Index = () => {
-  const [pickup, setPickup] = useState("125 Distribution Drive, Newark");
+  const [pickup, setPickup] = useState("New York Penn Station");
   const [stops, setStops] = useState(baseStops);
+  const [priorities, setPriorities] = useState<boolean[]>(baseStops.map(() => false));
   const [priority, setPriority] = useState("balanced");
   const [vehicle, setVehicle] = useState("van");
   const [optimized, setOptimized] = useState(false);
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [apiRouteData, setApiRouteData] = useState<any>(null);
+  const [liveLocations, setLiveLocations] = useState<any[]>([]);
 
-  const route = useMemo(() => {
-    const priorityBoost = priority === "urgent" ? 1.08 : priority === "eco" ? 0.89 : 1;
-    const vehicleFactor = vehicle === "bike" ? 0.72 : vehicle === "truck" ? 1.18 : 1;
-    const activeStops = stops.filter(Boolean);
-    const distance = Math.max(8, activeStops.length * 7.6 * priorityBoost * vehicleFactor);
-    const time = Math.round(distance * (vehicle === "bike" ? 4.8 : vehicle === "truck" ? 3.6 : 3.1));
-    const orderedStops = [...activeStops].sort((a, b) => (optimized ? a.length - b.length : 0));
-
-    return {
-      orderedStops,
-      distance: distance.toFixed(1),
-      time,
-      fuelSaved: Math.round(activeStops.length * 1.8 + (optimized ? 8 : 3)),
-      efficiency: Math.min(98, Math.round(72 + activeStops.length * 4 + (optimized ? 12 : 0))),
+  // Debounced geocoding for live map preview
+  useEffect(() => {
+    if (optimized) return;
+    
+    const fetchLocations = async () => {
+      const activeStops = stops.filter(s => s.trim().length > 3);
+      if (!pickup.trim() && activeStops.length === 0) {
+        setLiveLocations([]);
+        return;
+      }
+      
+      const addressesToGeocode = [
+        { address: pickup, isPriority: true, isStart: true },
+        ...activeStops.map((stop, i) => ({
+          address: stop,
+          isPriority: priorities[stops.indexOf(stop)] || false,
+          isStart: false
+        }))
+      ].filter(Boolean);
+      
+      try {
+        const results = [];
+        for (const item of addressesToGeocode) {
+           const response = await fetch(`http://localhost:5000/api/geocoding/geocode`, {
+              method: 'POST', 
+              headers: {'Content-Type': 'application/json'}, 
+              body: JSON.stringify({address: item.address})
+           });
+           const data = await response.json();
+           if(data.success) {
+              results.push({ 
+                lat: data.data.lat, 
+                lng: data.data.lng, 
+                originalAddress: item.address,
+                isPriority: item.isPriority,
+                isStart: item.isStart
+              });
+           }
+        }
+        setLiveLocations(results);
+      } catch (error) {
+        console.error("Live geocoding error:", error);
+      }
     };
-  }, [stops, priority, vehicle, optimized]);
 
-  const addStop = () => setStops((current) => [...current, ""]);
-  const updateStop = (index: number, value: string) =>
+    const timeoutId = setTimeout(fetchLocations, 1500);
+    return () => clearTimeout(timeoutId);
+  }, [pickup, stops, optimized]);
+
+  const handleOptimize = async () => {
+    setIsOptimizing(true);
+    try {
+      const activeStops = stops.map((stop, i) => ({
+        address: stop,
+        isPriority: priorities[i] || false
+      })).filter(s => s.address.trim().length > 0);
+
+      const response = await fetch('http://localhost:5000/api/route/optimize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          startLocation: pickup,
+          stops: activeStops,
+          vehicleType: vehicle
+        })
+      });
+      const result = await response.json();
+      if (result.success) {
+        setApiRouteData(result.data);
+        setOptimized(true);
+      } else {
+        alert("Optimization failed: " + result.message);
+      }
+    } catch (error) {
+      alert("Failed to connect to optimization server.");
+      console.error(error);
+    } finally {
+      setIsOptimizing(false);
+    }
+  };
+
+  const route = {
+    orderedStops: apiRouteData ? apiRouteData.optimizedOrder.map((loc: any) => loc.originalAddress) : stops.filter(Boolean),
+    distance: apiRouteData ? apiRouteData.summary.totalDistanceKm.toFixed(1) : "0.0",
+    time: apiRouteData ? Math.round(apiRouteData.summary.totalDurationMinutes) : 0,
+    fuelSaved: apiRouteData ? 18 : 0, 
+    fuelCost: apiRouteData ? apiRouteData.fuel.totalCost.toFixed(2) : "0.00",
+    efficiency: apiRouteData ? 98 : 72,
+  };
+
+  const addStop = () => {
+    setStops((current) => [...current, ""]);
+    setPriorities((current) => [...current, false]);
+    setOptimized(false);
+  };
+  const updateStop = (index: number, value: string) => {
     setStops((current) => current.map((stop, stopIndex) => (stopIndex === index ? value : stop)));
+    setOptimized(false);
+  };
+  const togglePriority = (index: number) => {
+    setPriorities((current) => current.map((p, i) => i === index ? !p : p));
+    setOptimized(false);
+  };
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -110,7 +199,10 @@ const Index = () => {
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button variant="panel"><PackageCheck /> Import Stops</Button>
-                <Button variant="command" onClick={() => setOptimized(true)}><Zap /> Optimize Now</Button>
+                <Button variant="command" onClick={handleOptimize} disabled={isOptimizing}>
+                  {isOptimizing ? <Sparkles className="animate-spin" /> : <Zap />} 
+                  {isOptimizing ? "Optimizing..." : "Optimize Now"}
+                </Button>
               </div>
             </div>
           </header>
@@ -148,14 +240,25 @@ const Index = () => {
                 <CardContent className="space-y-5">
                   <div className="space-y-2">
                     <Label>Pickup location</Label>
-                    <Input value={pickup} onChange={(event) => setPickup(event.target.value)} />
+                    <Input value={pickup} onChange={(event) => { setPickup(event.target.value); setOptimized(false); }} />
                   </div>
                   <div className="space-y-3">
                     <Label>Delivery stops</Label>
                     {stops.map((stop, index) => (
                       <div key={index} className="flex items-center gap-3">
-                        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground text-sm font-bold">{index + 1}</div>
-                        <Input value={stop} onChange={(event) => updateStop(index, event.target.value)} placeholder="Enter delivery address" />
+                        <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg text-sm font-bold ${priorities[index] ? 'bg-destructive text-destructive-foreground' : 'bg-primary text-primary-foreground'}`}>
+                          {priorities[index] ? 'P' : index + 1}
+                        </div>
+                        <Input value={stop} onChange={(event) => updateStop(index, event.target.value)} placeholder="Enter delivery address" className="flex-1" />
+                        <Button 
+                          variant="outline" 
+                          size="icon" 
+                          onClick={() => togglePriority(index)}
+                          className={priorities[index] ? 'text-yellow-500 border-yellow-500 bg-yellow-500/10' : 'text-muted-foreground'}
+                          title={priorities[index] ? "High Priority" : "Normal Priority"}
+                        >
+                          <Star className={priorities[index] ? "fill-yellow-500" : ""} />
+                        </Button>
                       </div>
                     ))}
                     <Button variant="panel" onClick={addStop}><Plus /> Add delivery stop</Button>
@@ -184,7 +287,10 @@ const Index = () => {
                       </Select>
                     </div>
                   </div>
-                  <Button className="w-full" variant="command" size="lg" onClick={() => setOptimized(true)}><Sparkles /> Optimize Route</Button>
+                  <Button className="w-full" variant="command" size="lg" onClick={handleOptimize} disabled={isOptimizing}>
+                    {isOptimizing ? <Sparkles className="animate-spin" /> : <Sparkles />} 
+                    {isOptimizing ? "Running TSP Optimization..." : "Optimize Route"}
+                  </Button>
                 </CardContent>
               </Card>
 
@@ -193,22 +299,11 @@ const Index = () => {
                   <CardTitle className="flex items-center gap-2"><MapPin className="text-primary" /> Route Visualization</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="relative min-h-[370px] overflow-hidden rounded-xl bg-gradient-map p-5">
-                    <div className="absolute inset-x-10 top-1/2 h-1 -translate-y-1/2 rotate-[-16deg] rounded-full bg-primary/35" />
-                    <div className="absolute left-[18%] top-[22%] h-24 w-1 rotate-[42deg] rounded-full bg-accent/50" />
-                    {route.orderedStops.map((stop, index) => (
-                      <div
-                        key={`${stop}-${index}`}
-                        className="absolute grid h-10 w-10 place-items-center rounded-full bg-primary text-primary-foreground shadow-command animate-route-pulse"
-                        style={{ left: `${18 + index * 20}%`, top: `${24 + (index % 2) * 34}%`, animationDelay: `${index * 180}ms` }}
-                      >
-                        {index + 1}
-                      </div>
-                    ))}
-                    <div className="absolute bottom-5 left-5 right-5 rounded-xl border bg-card/90 p-4 shadow-soft backdrop-blur">
-                      <p className="font-semibold">Interactive route panel</p>
-                      <p className="mt-1 text-sm text-muted-foreground">Pickup from {pickup || "origin"}, then complete {route.orderedStops.length} stops using the shortest available sequence.</p>
-                    </div>
+                  <div className="relative h-[370px] overflow-hidden rounded-xl bg-muted/20">
+                    <RouteMap 
+                      locations={optimized && apiRouteData ? apiRouteData.optimizedOrder : liveLocations} 
+                      isOptimized={optimized} 
+                    />
                   </div>
                 </CardContent>
               </Card>
@@ -253,7 +348,9 @@ const Index = () => {
                     <CardTitle className="flex items-center gap-2"><Sparkles className="text-primary" /> AI Insights</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4 text-sm text-muted-foreground">
-                    <p className="rounded-lg bg-secondary p-4 text-foreground">AI prioritized clustered stops first, reduced cross-city backtracking, and balanced ETA risk against vehicle efficiency.</p>
+                    <p className="rounded-lg bg-secondary p-4 text-foreground leading-relaxed">
+                      {apiRouteData?.summary?.aiBriefing || "AI prioritized clustered stops first, reduced cross-city backtracking, and balanced ETA risk against vehicle efficiency."}
+                    </p>
                     <div className="flex gap-3"><TimerReset className="h-5 w-5 shrink-0 text-success" /> Start with dense zones before peak congestion.</div>
                     <div className="flex gap-3"><Fuel className="h-5 w-5 shrink-0 text-success" /> Use eco priority for lower idle time and fuel burn.</div>
                     <div className="flex gap-3"><Zap className="h-5 w-5 shrink-0 text-warning" /> Re-optimize when new urgent deliveries arrive.</div>
@@ -295,8 +392,8 @@ const Index = () => {
               <Card className="rounded-xl bg-gradient-command text-primary-foreground shadow-command">
                 <CardHeader><CardTitle>Fuel Consumption Estimate</CardTitle></CardHeader>
                 <CardContent>
-                  <p className="font-display text-5xl font-bold">{Math.max(1.4, Number(route.distance) / 12).toFixed(1)} gal</p>
-                  <p className="mt-4 text-primary-foreground/76">Projected for current vehicle, route density, and stop count.</p>
+                  <p className="font-display text-5xl font-bold">${route.fuelCost}</p>
+                  <p className="mt-4 text-primary-foreground/76">Estimated fuel cost based on optimized route distance.</p>
                   <div className="mt-8 rounded-lg bg-primary-foreground/12 p-4">
                     <p className="text-sm font-semibold">Route summary</p>
                     <p className="mt-1 text-sm text-primary-foreground/72">{route.efficiency}% efficient with {route.fuelSaved}% fuel savings.</p>
